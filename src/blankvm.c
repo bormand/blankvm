@@ -166,12 +166,30 @@ fail:
 }
 
 static int vm_run(struct vm_state *vm) {
-    if (ioctl(vm->cpu, KVM_RUN, 0) < 0) {
-        perror("KVM_RUN");
-        goto fail;
+    while (1) {
+        if (ioctl(vm->cpu, KVM_RUN, 0) < 0) {
+            perror("KVM_RUN");
+            goto fail;
+        }
+
+        if (vm->run->exit_reason == KVM_EXIT_IO && vm->run->io.port == 0x3F8 &&
+                vm->run->io.size == 1 && vm->run->io.count == 1) {
+            uint8_t* data = ((uint8_t*)vm->run) + vm->run->io.data_offset;
+            if (vm->run->io.direction == KVM_EXIT_IO_OUT) {
+                putchar(data[0]);
+            } else {
+                int c = getchar();
+                if (c == EOF)
+                    break;
+                data[0] = c;
+            }
+            continue;
+        }
+
+        fprintf(stderr, "Exit reason: %u\n", vm->run->exit_reason);
+        break;
     }
 
-    fprintf(stderr, "Exit reason: %u\n", vm->run->exit_reason);
     return 0;
 
 fail:
