@@ -122,6 +122,7 @@ static int vm_load_image(struct vm_state *vm, const char *path) {
         goto fail;
     }
 
+    close(fd);
     return 0;
 
 fail:
@@ -210,6 +211,7 @@ static int execute_image(const char *path, size_t mem_size) {
     if (vm_run(vm) < 0)
         goto fail;
 
+    vm_free(vm);
     return 0;
 
 fail:
