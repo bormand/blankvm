@@ -37,3 +37,4 @@ function(add_test_on_asm name)
 endfunction()
 
 add_test_on_asm(test16)
+add_test_on_asm(test32 -P)

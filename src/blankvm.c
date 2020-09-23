@@ -146,6 +146,16 @@ fail:
     return -1;
 }
 
+static void vm_setup_segment(struct kvm_segment *seg, enum vm_mode mode, int is_code) {
+    seg->base = 0;
+    seg->selector = mode == VM_MODE_REAL ? 0 : (is_code ? 8 : 16);
+    seg->limit = mode == VM_MODE_REAL ? 0xFFFF : 0xFFFFFFFF;
+    seg->type = is_code ? 0x0B : 0x03;
+    seg->db = mode == VM_MODE_PROTECTED ? 1 : 0;
+    seg->l = mode == VM_MODE_LONG ? 1 : 0;
+    seg->g = mode == VM_MODE_REAL ? 0 : 1;
+}
+
 static int vm_prepare_to_boot(struct vm_state *vm, const struct vm_options *options) {
     struct kvm_regs regs = {};
     struct kvm_sregs sregs = {};
@@ -160,14 +170,34 @@ static int vm_prepare_to_boot(struct vm_state *vm, const struct vm_options *opti
         goto fail;
     }
 
-    if (options->mode != VM_MODE_REAL) {
+
+    switch (options->mode) {
+    case VM_MODE_REAL:
+        if (options->entry_point >= 0x10000) {
+            fprintf(stderr, "Entry point too far for real mode\n");
+            goto fail;
+        }
+        break;
+    case VM_MODE_PROTECTED:
+        if (options->entry_point >= 0x100000000ull) {
+            fprintf(stderr, "Entry point too far for protected mode\n");
+            goto fail;
+        }
+        sregs.cr0 |= 0x00000001;
+        break;
+    case VM_MODE_LONG:
         fprintf(stderr, "Unsupported yet\n");
         goto fail;
     }
 
     regs.rip = options->entry_point;
-    sregs.cs.base = 0;
-    sregs.cs.selector = 0;
+
+    vm_setup_segment(&sregs.cs, options->mode, 1);
+    vm_setup_segment(&sregs.ds, options->mode, 0);
+    vm_setup_segment(&sregs.es, options->mode, 0);
+    vm_setup_segment(&sregs.fs, options->mode, 0);
+    vm_setup_segment(&sregs.gs, options->mode, 0);
+    vm_setup_segment(&sregs.ss, options->mode, 0);
 
     if (ioctl(vm->cpu, KVM_SET_REGS, &regs) < 0) {
         perror("KVM_SET_REGS");
