@@ -183,11 +183,14 @@ static int vm_prepare_to_boot(struct vm_state *vm, const struct vm_options *opti
             fprintf(stderr, "Entry point too far for protected mode\n");
             goto fail;
         }
-        sregs.cr0 |= 0x00000001;
+        sregs.cr0 |= 0x00000001; // PE
         break;
     case VM_MODE_LONG:
-        fprintf(stderr, "Unsupported yet\n");
-        goto fail;
+        sregs.cr0 |= 0x80000001; // PG, PE
+        sregs.cr3 = options->page_table;
+        sregs.cr4 |= 0x00000020; // PAE
+        sregs.efer |= 0x00000500; // LMA, LME
+        break;
     }
 
     regs.rip = options->entry_point;
