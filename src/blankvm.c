@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -17,6 +18,19 @@ struct vm_state {
     size_t mem_size;
     struct kvm_run *run;
     size_t run_size;
+};
+
+enum vm_mode {
+    VM_MODE_REAL,
+    VM_MODE_PROTECTED,
+    VM_MODE_LONG
+};
+
+struct vm_options {
+    enum vm_mode mode;
+    size_t mem_size;
+    size_t entry_point;
+    size_t page_table;
 };
 
 static void vm_free(struct vm_state *vm) {
@@ -132,7 +146,7 @@ fail:
     return -1;
 }
 
-static int vm_prepare_to_boot(struct vm_state *vm) {
+static int vm_prepare_to_boot(struct vm_state *vm, const struct vm_options *options) {
     struct kvm_regs regs = {};
     struct kvm_sregs sregs = {};
 
@@ -146,7 +160,12 @@ static int vm_prepare_to_boot(struct vm_state *vm) {
         goto fail;
     }
 
-    regs.rip = 0;
+    if (options->mode != VM_MODE_REAL) {
+        fprintf(stderr, "Unsupported yet\n");
+        goto fail;
+    }
+
+    regs.rip = options->entry_point;
     sregs.cs.base = 0;
     sregs.cs.selector = 0;
 
@@ -280,15 +299,16 @@ fail:
     return -1;
 }
 
-static int execute_image(const char *path, size_t mem_size) {
-    struct vm_state *vm = vm_create(mem_size);
+
+static int execute_image(const char *path, const struct vm_options *options) {
+    struct vm_state *vm = vm_create(options->mem_size);
     if (!vm)
         goto fail;
 
     if (vm_load_image(vm, path) < 0)
         goto fail;
 
-    if (vm_prepare_to_boot(vm) < 0)
+    if (vm_prepare_to_boot(vm, options) < 0)
         goto fail;
 
     if (vm_run(vm) < 0)
@@ -302,14 +322,76 @@ fail:
     return -1;
 }
 
+static int parse_num(const char *s, size_t *out) {
+    if (s == NULL || *s == '\0')
+        return -1;
+
+    char *end = 0;
+    errno = 0;
+    uint64_t num = strtoull(s, &end, 0);
+    if (errno != 0)
+        return -1;
+
+    if (*end != '\0')
+        return -1;
+
+    if (num > SIZE_MAX)
+        return -1;
+
+    *out = (size_t)num;
+    return 0;
+}
+
 int main(int argc, char **argv) {
-    if (argc != 2) {
-        fprintf(stderr, "blankvm <image>\n");
-        return 1;
+    int opt = 0;
+    struct vm_options options = {
+        .mode = VM_MODE_REAL,
+        .mem_size = 1024 * 1024,
+    };
+
+    while ((opt = getopt(argc, argv, "RPLe:p:m:")) != -1) {
+        switch (opt) {
+        case 'R':
+            options.mode = VM_MODE_REAL;
+            break;
+        case 'P':
+            options.mode = VM_MODE_PROTECTED;
+            break;
+        case 'L':
+            options.mode = VM_MODE_LONG;
+            break;
+        case 'm':
+            if (parse_num(optarg, &options.mem_size) < 0)
+                goto bad_args;
+            break;
+        case 'e':
+            if (parse_num(optarg, &options.entry_point) < 0)
+                goto bad_args;
+            break;
+        case 'p':
+            if (parse_num(optarg, &options.page_table) < 0)
+                goto bad_args;
+            break;
+        default:
+            goto bad_args;
+        }
     }
 
-    if (execute_image(argv[1], 1024*1024))
-        return 1;
+    if (optind >= argc)
+        goto bad_args;
 
-    return 0;
+    if (execute_image(argv[optind], &options))
+        return EXIT_FAILURE;
+
+    return EXIT_SUCCESS;
+
+bad_args:
+    fprintf(stderr, "Usage: blankvm [-RPL] [-m mem_size] [-e entry] [-p page_table] image\n\n");
+    fprintf(stderr, "  -R    real mode (16-bit)\n");
+    fprintf(stderr, "  -P    protected mode (32-bit)\n");
+    fprintf(stderr, "  -L    long mode (64-bit)\n");
+    fprintf(stderr, "  -m    memory size\n");
+    fprintf(stderr, "  -e    entry point address\n");
+    fprintf(stderr, "  -p    page table address (only for long mode)\n\n");
+    return EXIT_FAILURE;
 }
