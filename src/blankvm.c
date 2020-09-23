@@ -166,6 +166,89 @@ fail:
     return -1;
 }
 
+static void vm_dump_segment(const char* name, struct kvm_segment *seg) {
+    fprintf(stderr, "%s BASE=%016llx LIM=%08x SEL=%04x ", name, seg->base, seg->limit, seg->selector);
+    fprintf(stderr, "TP=%x P=%x DPL=%x DB=%x S=%x L=%x G=%x A=%x\n",
+        seg->type, seg->present, seg->dpl, seg->db, seg->s, seg->l, seg->g, seg->avl);
+}
+
+static void vm_dump(const struct vm_state *vm) {
+    fprintf(stderr, "===== BEGIN VM STATE =====\n");
+
+    const char *exit_reasons[] = {
+        "KVM_EXIT_UNKNOWN", "KVM_EXIT_EXCEPTION", "KVM_EXIT_IO", "KVM_EXIT_HYPERCALL",
+        "KVM_EXIT_DEBUG", "KVM_EXIT_HLT", "KVM_EXIT_MMIO", "KVM_EXIT_IRQ_WINDOW_OPEN",
+        "KVM_EXIT_SHUTDOWN", "KVM_EXIT_FAIL_ENTRY", "KVM_EXIT_INTR", "KVM_EXIT_SET_TPR",
+        "KVM_EXIT_TPR_ACCESS", "KVM_EXIT_S390_SIEIC", "KVM_EXIT_S390_RESET", "KVM_EXIT_DCR",
+        "KVM_EXIT_NMI", "KVM_EXIT_INTERNAL_ERROR", "KVM_EXIT_OSI", "KVM_EXIT_PAPR_HCALL",
+        "KVM_EXIT_S390_UCONTROL", "KVM_EXIT_WATCHDOG", "KVM_EXIT_S390_TSCH", "KVM_EXIT_EPR",
+        "KVM_EXIT_SYSTEM_EVENT", "KVM_EXIT_S390_STSI", "KVM_EXIT_IOAPIC_EOI", "KVM_EXIT_HYPERV"
+    };
+
+    const uint32_t exit_reason = vm->run->exit_reason;
+    fprintf(stderr, "Exit reason: %u (%s)\n\n", exit_reason,
+        vm->run->exit_reason < sizeof(exit_reasons)/sizeof(*exit_reasons) ? exit_reasons[exit_reason] : "UNKNOWN");
+
+    if (exit_reason == KVM_EXIT_IO) {
+        if (vm->run->io.direction == KVM_EXIT_IO_OUT) {
+            fprintf(stderr, "Write %ux%u bytes at port %04x: ",
+                vm->run->io.count, vm->run->io.size, vm->run->io.port);
+            for (size_t i = 0; i < vm->run->io.count * vm->run->io.size; ++i)
+                fprintf(stderr, "%02x ", ((const uint8_t*)vm->run)[vm->run->io.data_offset + i]);
+            fprintf(stderr, "\n\n");
+        } else {
+            fprintf(stderr, "Read %ux%u bytes at port %04x\n\n",
+                vm->run->io.count, vm->run->io.size, vm->run->io.port);
+        }
+    } else if (exit_reason == KVM_EXIT_MMIO) {
+        if (vm->run->mmio.is_write) {
+            fprintf(stderr, "Write %u bytes at %016llx: ",
+                vm->run->mmio.len, vm->run->mmio.phys_addr);
+            for (size_t i = 0; i < vm->run->mmio.len; ++i)
+                fprintf(stderr, "%02x ", vm->run->mmio.data[i]);
+            fprintf(stderr, "\n\n");
+        } else {
+            fprintf(stderr, "Read %u bytes at %016llx\n\n",
+                vm->run->mmio.len, vm->run->mmio.phys_addr);
+        }
+    }
+
+    struct kvm_regs regs = {};
+    if (ioctl(vm->cpu, KVM_GET_REGS, &regs) < 0) {
+        perror("KVM_GET_REGS");
+    } else {
+        fprintf(stderr, "RAX=%016llx RBX=%016llx RCX=%016llx RDX=%016llx\n", regs.rax, regs.rbx, regs.rcx, regs.rdx);
+        fprintf(stderr, "RSI=%016llx RDI=%016llx RSP=%016llx RBP=%016llx\n", regs.rsi, regs.rdi, regs.rsp, regs.rbp);
+        fprintf(stderr, "R8 =%016llx R9 =%016llx R10=%016llx R11=%016llx\n", regs.r8,  regs.r9,  regs.r10, regs.r11);
+        fprintf(stderr, "R12=%016llx R13=%016llx R14=%016llx R15=%016llx\n", regs.r12, regs.r13, regs.r14, regs.r15);
+        fprintf(stderr, "RIP=%016llx RFL=%016llx\n\n", regs.rip, regs.rflags);
+    }
+
+    struct kvm_sregs sregs = {};
+    if (ioctl(vm->cpu, KVM_GET_SREGS, &sregs) < 0) {
+        perror("KVM_GET_SREGS");
+    } else {
+
+        vm_dump_segment("CS ", &sregs.cs);
+        vm_dump_segment("DS ", &sregs.ds);
+        vm_dump_segment("ES ", &sregs.es);
+        vm_dump_segment("FS ", &sregs.fs);
+        vm_dump_segment("GS ", &sregs.gs);
+        vm_dump_segment("SS ", &sregs.ss);
+        vm_dump_segment("TR ", &sregs.tr);
+        vm_dump_segment("LDT", &sregs.ldt);
+        fprintf(stderr, "GDT BASE=%016llx LIM=%04x        ", sregs.gdt.base, sregs.gdt.limit);
+        fprintf(stderr, "IDT BASE=%016llx LIM=%04x\n\n", sregs.idt.base, sregs.idt.limit);
+
+        fprintf(stderr, "CR0=%016llx CR2=%016llx CR3=%016llx CR4=%016llx\n", sregs.cr0, sregs.cr2, sregs.cr3, sregs.cr4);
+        fprintf(stderr, "CR8=%016llx EFER=%016llx APIC=%016llx\n", sregs.cr8, sregs.efer, sregs.apic_base);
+        fprintf(stderr, "INT BITMAP %016llx %016llx %016llx %016llx\n",
+            sregs.interrupt_bitmap[0], sregs.interrupt_bitmap[1], sregs.interrupt_bitmap[2], sregs.interrupt_bitmap[3]);
+    }
+
+    fprintf(stderr, "===== END VM STATE =====\n\n");
+}
+
 static int vm_run(struct vm_state *vm) {
     while (1) {
         if (ioctl(vm->cpu, KVM_RUN, 0) < 0) {
@@ -187,8 +270,8 @@ static int vm_run(struct vm_state *vm) {
             continue;
         }
 
-        fprintf(stderr, "Exit reason: %u\n", vm->run->exit_reason);
-        break;
+        vm_dump(vm);
+        goto fail;
     }
 
     return 0;
