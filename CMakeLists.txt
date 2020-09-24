@@ -38,4 +38,4 @@ endfunction()
 
 add_test_on_asm(test16)
 add_test_on_asm(test32 -P)
-add_test_on_asm(test64 "-L -e 0x1000")
+add_test_on_asm(test64 -L)

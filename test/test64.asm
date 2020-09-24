@@ -1,10 +1,5 @@
-; Simple recursive page table
-; 3 = present, writable
-dq 0x0000000000000003
-dq 0x0000000000001003
-align 4096
-
 bits 64
+
     mov dx, 03F8h
     mov rsi, hello
 out_loop:
@@ -22,4 +17,3 @@ echo_loop:
 
 hello:
     db "Hello, world!", 10, 0
-

@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -18,6 +19,8 @@ struct vm_state {
     size_t mem_size;
     struct kvm_run *run;
     size_t run_size;
+    void *page_table;
+    size_t page_table_size;
 };
 
 enum vm_mode {
@@ -30,6 +33,7 @@ struct vm_options {
     enum vm_mode mode;
     size_t mem_size;
     size_t entry_point;
+    int page_table_is_set;
     size_t page_table;
 };
 
@@ -47,6 +51,8 @@ static void vm_free(struct vm_state *vm) {
         close(vm->kvm);
     if (vm->mem != MAP_FAILED)
         munmap(vm->mem, vm->mem_size);
+    if (vm->page_table != MAP_FAILED)
+        munmap(vm->page_table, vm->page_table_size);
 
     free(vm);
 }
@@ -65,6 +71,8 @@ static struct vm_state *vm_create(size_t mem_size) {
     vm->mem_size = 0;
     vm->run = MAP_FAILED;
     vm->run_size = 0;
+    vm->page_table = MAP_FAILED;
+    vm->page_table_size = 0;
 
     vm->kvm = open("/dev/kvm", O_RDWR);
     if (vm->kvm < 0) {
@@ -146,6 +154,61 @@ fail:
     return -1;
 }
 
+const size_t PAGE_SIZE = 4096;
+
+static size_t bytes_to_pages(size_t bytes) {
+    return (bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+}
+
+static int vm_fill_page_table(struct vm_state *vm, uint64_t *cr3) {
+    const size_t pt_levels = 4;
+    size_t pt_pages = 0;
+    for (size_t level = 0, pages = bytes_to_pages(vm->mem_size); level < pt_levels; ++level) {
+        pages = bytes_to_pages(pages * sizeof(uint64_t));
+        pt_pages += pages;
+    }
+
+    size_t guest_pt_base = vm->mem_size;
+    vm->page_table_size = pt_pages * PAGE_SIZE;
+    vm->page_table = mmap(NULL, vm->page_table_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (vm->page_table == MAP_FAILED) {
+        perror("mmap page table");
+        goto fail;
+    }
+
+    memset(vm->page_table, 0, vm->page_table_size);
+
+    void *pt_base = vm->page_table;
+    for (size_t level = 0, base = 0, pages = bytes_to_pages(vm->mem_size); level < pt_levels; ++level) {
+        uint64_t *pt = (uint64_t*)pt_base;
+        for (size_t i = 0; i < pages; ++i) {
+            pt[i] = base + i * PAGE_SIZE + 0x03; // 3 = present + writable
+        }
+
+        base = (uint64_t)(pt_base - vm->page_table + guest_pt_base);
+        pages = bytes_to_pages(pages * sizeof(uint64_t));
+        pt_base += pages * PAGE_SIZE;
+    }
+
+    struct kvm_userspace_memory_region region = {
+        .slot = 1,
+        .guest_phys_addr = guest_pt_base,
+        .memory_size = vm->page_table_size,
+        .userspace_addr = (uintptr_t)vm->page_table,
+    };
+
+    if (ioctl(vm->vm, KVM_SET_USER_MEMORY_REGION, &region) < 0) {
+        perror("KVM_SET_USER_MEMORY_REGION page table");
+        goto fail;
+    }
+
+    *cr3 = guest_pt_base + (pt_pages - 1) * PAGE_SIZE;
+    return 0;
+
+fail:
+    return -1;
+}
+
 static void vm_setup_segment(struct kvm_segment *seg, enum vm_mode mode, int is_code) {
     seg->base = 0;
     seg->selector = mode == VM_MODE_REAL ? 0 : (is_code ? 8 : 16);
@@ -170,7 +233,6 @@ static int vm_prepare_to_boot(struct vm_state *vm, const struct vm_options *opti
         goto fail;
     }
 
-
     switch (options->mode) {
     case VM_MODE_REAL:
         if (options->entry_point >= 0x10000) {
@@ -186,8 +248,15 @@ static int vm_prepare_to_boot(struct vm_state *vm, const struct vm_options *opti
         sregs.cr0 |= 0x00000001; // PE
         break;
     case VM_MODE_LONG:
+        if (options->page_table_is_set) {
+            sregs.cr3 = options->page_table;
+        } else {
+            uint64_t cr3 = 0;
+            if (vm_fill_page_table(vm, &cr3) < 0)
+                goto fail;
+            sregs.cr3 = cr3;
+        }
         sregs.cr0 |= 0x80000001; // PG, PE
-        sregs.cr3 = options->page_table;
         sregs.cr4 |= 0x00000020; // PAE
         sregs.efer |= 0x00000500; // LMA, LME
         break;
@@ -404,6 +473,7 @@ int main(int argc, char **argv) {
         case 'p':
             if (parse_num(optarg, &options.page_table) < 0)
                 goto bad_args;
+            options.page_table_is_set = 1;
             break;
         default:
             goto bad_args;

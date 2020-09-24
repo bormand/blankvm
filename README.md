@@ -23,13 +23,14 @@ Examples:
 
   blankvm -R test16.bin
   blankvm -P test32.bin
-  blankvm -L -p 0 -e 0x1000 test64.bin
+  blankvm -L test64.bin
 ```
 
 Image is always loaded at physical address 0.
 
 For real mode segment registers are set to 0. For protected mode segments are tuned to base=0, limit=0xFFFFFFFF. Values of other registers are unspecified.
 
-Long mode requires a page table, add it to the image and specify its address with `-p` option.
+Long mode requires a page table. Page table with 1:1 mapping is generated automatically.
+If you need different mapping, you can add table to the image and specify its address with `-p` option.
 
 Virtual serial port is mapped to `0x3F8` and linked to the stdin and stdout.
